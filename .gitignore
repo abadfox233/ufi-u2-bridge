@@ -1,0 +1,10 @@
+# 设备端运行态产物
+*.pid
+*.b64.tmp
+pkg.tar.gz
+logs/
+leases
+dnsmasq.hosts.conf
+hsguard.state
+hsguard.observe
+hsguard.off
