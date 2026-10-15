@@ -29,7 +29,18 @@ FM_U20 (UNISOC 随身WiFi, Android 13, 32 位 userland) 的 **WiFi/有线同网�
 
 1. **插件(推荐)**: UFI Tools 插件管理导入 `plugin/bridge_manager_v1.3.js.txt` (自包含, 离线可装),
    主界面出现「桥接管理」, 点【安装】即部署到 `/data/kano_bridge/`。
-2. **手动**: 解 `dist/kano_bridge_v1.7.tar.gz` 到 `/data/kano_bridge/`, 执行 `sh /data/kano_bridge/run.sh -s`。
+2. **手动**: 解 `dist/kano_bridge_v1.7.tar.gz` 到 `/data/kano_bridge/`, 补执行权限后启动:
+
+```sh
+mkdir -p /data/kano_bridge
+tar xzf kano_bridge_v1.7.tar.gz -C /data/kano_bridge
+chmod 755 /data/kano_bridge /data/kano_bridge/run.sh /data/kano_bridge/off.sh /data/kano_bridge/bin/dnsmasq
+sh /data/kano_bridge/run.sh -s
+```
+
+> 可执行位是硬要求: `run.sh` 用 `[ -x "$MODDIR/bin/dnsmasq" ]` 判定二进制是否可用, 缺执行位则不启 DHCP/DNS。
+> 插件安装路径内部会自己 `chmod 755`, 手动解包务必补上; git 拉下来若权限是 644 (Windows/挂载盘),
+> 用 `chmod 755` 恢复或用 `git config core.fileMode true` + 重新 checkout。
 
 ## 用法
 
