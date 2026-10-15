@@ -5,6 +5,10 @@
 # v1.6: dnsmasq 存活检测改 cmdline 扫描(不依赖 pidfile) + 重拉失败 15s 自动重试 (修: 重拉失败→pidfile缺→永久无人重拉→RA停发v6黑洞)
 # v1.7: + hotspot_guard 热点守护 (修: 蜂窝重拨拆 tethering 栈后热点永不复活, 2026-10-14 01:15 事故 8h 断网)
 #       hostapd 消失 + 蜂窝在线 → 连续2轮确认 → HotspotCtl restart (UFI Tools 同款 dex, 框架保存配置原样生效)
+# v1.8: 运营商无关的蜂窝 v6 前缀 — 旧版把 2408::/16(联通) 写死, 换卡/换运营商(2409 移动 / 240e 电信 / 其他)v6 链整体失效
+#       改为从 $WAN 的 SLAAC(scope global dynamic) 地址推导 /64 前缀, 退化取任意 scope global(排除 fe80/ULA);
+#       可用 KANO_V6_PREFIX 显式覆盖(形如 2409:8a00:1234:0)。顺带修两处"正则与地址文本不匹配"的历史死代码:
+#       启动时 proxy NDP 播种 与 sipa 表 kernel 路由压制 —— 旧写法(去掉冒号拼正则 / 前缀少一个冒号)永不命中。
 # 用法: run.sh -s|-k|-r|-t|-m|-d  (start/stop/restart/status/monitor/daemon)
 # 依赖: bin/dnsmasq (2.90 armv7 static, Android-patched), bin/hotspotctl.dex (UFI Tools 提取), /system/bin/ip, iptables
 # 全部内存态, stop 或重启即还原出厂
@@ -29,6 +33,56 @@ log() {
     [ -n "$now" ] || now="unknown-time"
     printf '%s %s\n' "$now" "$*" >> "$LOG"
     printf '%s\n' "$*"
+}
+
+# ---------- 运营商无关的蜂窝 IPv6 前缀 (v1.8) ----------
+# 背景: 旧版把运营商前缀写死为 2408::/16(中国联通), 换卡/换运营商(2409 移动 / 240e 电信 / 其他)后 v6 链整体失效。
+# 现在统一从接口上实际拿到的地址推导:
+#   1) KANO_V6_PREFIX 环境变量显式覆盖(形如 2409:8a00:1234:0, 可带 ::) — 前缀异常/测试用
+#   2) 接口上 scope global dynamic(SLAAC) 的地址 → 该 /64 前缀(前 4 个 hextet)
+#   3) 退化: 任意 scope global 地址(排除 fe80 链路本地 与 fc00::/7 ULA)
+# 输出形如 "2408:8409:7901:25ca"(不带 ::); 找不到输出空。
+# 注: 取前缀前必须展开 "::" —— 运营商 /64 常含全零 hextet(如 240e:3a0::/64), 直接 cut -d: -f1-4 会切错。
+# 共用 awk: 从 `ip -6 addr show` 形状的文本里取 /64 前缀
+#   优先 scope global dynamic(SLAAC); 退化取任意 scope global; 排除 fe80 链路本地 与 fc00::/7 ULA
+#   必须先展开 "::" —— 运营商 /64 常含全零 hextet(如 240e:3a0::/64), 直接 cut -d: -f1-4 会切错
+V6PFX_AWK='
+        function expand(a,   p, L, R, i, full) {
+            sub(/\/[0-9]+$/, "", a)
+            if (a !~ /::/) return a
+            split(a, p, "::")
+            L = split(p[1], X, ":"); R = (p[2] == "" ? 0 : split(p[2], Y, ":"))
+            full = p[1]
+            for (i = 0; i < 8 - L - R; i++) full = full ":0"
+            return full ":" p[2]
+        }
+        /inet6/ && /scope global/ {
+            a = $2
+            if (a ~ /^fe80/ || a ~ /^f[cd]/) next
+            split(expand(a), H, ":")
+            pre = H[1] ":" H[2] ":" H[3] ":" H[4]
+            if ($0 ~ /dynamic/) { if (dyn == "") dyn = pre } else if (glo == "") glo = pre
+        }
+        END { print (dyn != "" ? dyn : glo) }'
+
+v6_prefix_of() {   # $1 = 接口名
+    ip -6 addr show dev "$1" 2>/dev/null | awk "$V6PFX_AWK"
+}
+
+v6_prefix_of_addr() {   # $1 = 地址字面量(可带 /len) → 其 /64 前缀
+    printf 'inet6 %s/64 scope global dynamic\n' "${1%%/*}" | awk "$V6PFX_AWK"
+}
+
+cellular_v6_prefix() {   # 上游($WAN)前缀, 支持 KANO_V6_PREFIX 覆盖
+    if [ -n "$KANO_V6_PREFIX" ]; then printf '%s' "${KANO_V6_PREFIX%::}"; return 0; fi
+    v6_prefix_of "$WAN"
+}
+
+v6_in_prefix() {   # $1=地址 $2=/64 前缀; 前缀的两种写法都认(2409:8a00:1234:0 / 2409:8a00:1234::)
+    case "$1" in
+        "$2":*|"$2"::*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # 等热点起来 (wlan0 有 IPv4 且 hostapd 在跑), 最多 120s
@@ -167,10 +221,11 @@ start() {
     # (br0 与 wlan0 同 LL → 手机判定路由器抖动拒绝 SLAAC), 关掉后 br0 成为唯一 RA 源
     echo 1 > /proc/sys/net/ipv6/conf/wlan0/disable_ipv6 2>/dev/null
     echo 1 > /proc/sys/net/ipv6/conf/eth0/disable_ipv6 2>/dev/null
-    V6P=$(ip -6 addr show $WAN 2>/dev/null | grep -m1 "scope global dynamic" | awk '{print $2}' | cut -d: -f1-4)
+    V6P=$(cellular_v6_prefix)
     if [ -n "$V6P" ]; then
-        V6P="${V6P}::"
-        ip addr add ${V6P}1/64 dev $BR 2>/dev/null
+        V6NET="${V6P}::"
+        log "cellular v6 prefix = ${V6P}/64 (运营商无关自动推导; KANO_V6_PREFIX 可覆盖)"
+        ip addr add ${V6NET}1/64 dev $BR 2>/dev/null
         # 刷新 dnsmasq 使 RA 拾取新前缀 (TERM+KILL 双发, 防 REUSEPORT 双活竞态)
         [ -f "$PIDF" ] && { kill "$(cat "$PIDF")" 2>/dev/null; kill -9 "$(cat "$PIDF")" 2>/dev/null; sleep 1; }
         "$DM" --conf-file="$CONF" 2>>"$LOG"
@@ -178,27 +233,28 @@ start() {
         ip6tables -I FORWARD 1 -i $BR -o $WAN -j ACCEPT
         ip6tables -I FORWARD 1 -i $WAN -o $BR -m state --state RELATED,ESTABLISHED -j ACCEPT
         # 关键: sipa_eth0 表的 v6 /64 静态路由会把回程甩回蜂窝口(手机v6 TCP卡SYN_RECV), 指向 br0
-        ip -6 route replace ${V6P}/64 dev $BR table $WAN 2>/dev/null
+        ip -6 route replace ${V6NET}/64 dev $BR table $WAN 2>/dev/null
         # 删 sipa 表的 kernel 连接路由(同段双挂的副产物): 它 metric 256 抢道, NS 从蜂窝口发出永远无解
         # — F50 无此问题的原因是它的固件只在 br0 配 /64(ZTE 定制), 我们双挂必须删
-        ip -6 route del ${V6P}/64 dev $WAN proto kernel table $WAN 2>/dev/null
+        ip -6 route del ${V6NET}/64 dev $WAN proto kernel table $WAN 2>/dev/null
         # main 表也要有 (回程路由查找)
-        ip -6 route replace ${V6P}/64 dev $BR 2>/dev/null
+        ip -6 route replace ${V6NET}/64 dev $BR 2>/dev/null
         # 回程三表补全: iif sipa_eth0 的回程包按 rule 18000/19000/20000 查 legacy_system/legacy_network/local_network
         # 框架拆 wlan0 v6 时会清空这些表的 v6 → 回程 Network unreachable 全黑洞 (最终真凶)
         for T in local_network legacy_system legacy_network; do
-            ip -6 route replace ${V6P}/64 dev $BR table $T 2>/dev/null
+            ip -6 route replace ${V6NET}/64 dev $BR table $T 2>/dev/null
         done
         # proxy NDP: 手机 SLAAC 地址在蜂窝 /64 内但不在蜂窝链路上, 运营商 NS 无人应答 → 回程黑洞
         # (IPv6 版 ARP 代理, F50 固件内置, 手工复刻) — 把 br0 上学到的该前缀邻居全部代理到蜂窝口
+        # v1.8 修: 旧写法把前缀里的冒号全删了再拼正则(^2408840081[0-9a-f:]*), 与地址文本永不匹配 → 播种恒为空
         echo 1 > /proc/sys/net/ipv6/conf/$WAN/proxy_ndp 2>/dev/null
-        for A in $(ip -6 neigh show dev $BR 2>/dev/null | grep -oE "^${V6P//[!0-9a-f]/}[0-9a-f:]*"); do
-            ip -6 neigh replace proxy $A dev $WAN 2>/dev/null
+        for A in $(ip -6 neigh show dev $BR 2>/dev/null | awk '$1 ~ /:/ && $1 !~ /^fe80/ {print $1}'); do
+            v6_in_prefix "$A" "$V6P" && ip -6 neigh replace proxy $A dev $WAN 2>/dev/null
         done
         # WG_ROUTE mangle 链绑 -i wlan0, 桥后 iif=br0 绕过 → 补 br0 入口(kano_wireguard 内网分流)
         iptables -t mangle -C PREROUTING -i $BR -j WG_ROUTE_wg0 2>/dev/null || \
             iptables -t mangle -I PREROUTING 1 -i $BR -j WG_ROUTE_wg0
-        log "ipv6 up: ${V6P}1/64 on $BR, RA enabled"
+        log "ipv6 up: ${V6NET}1/64 on $BR, RA enabled"
     else
         log "WARN: no cellular v6 prefix found, skip v6"
     fi
@@ -316,8 +372,8 @@ monitor() {
         log "monitor: local_network route fixed"
     }
     # v6 前缀变化检测 (蜂窝重拨后前缀会变)
-    V6P=$(ip -6 addr show $WAN 2>/dev/null | grep -m1 "scope global dynamic" | awk '{print $2}' | cut -d: -f1-4)
-    V6BR=$(ip -6 addr show $BR 2>/dev/null | grep -m1 "scope global" | awk '{print $2}' | cut -d: -f1-4)
+    V6P=$(cellular_v6_prefix)
+    V6BR=$(v6_prefix_of $BR)
     if [ -n "$V6P" ] && [ "$V6P" != "$V6BR" ]; then
         log "monitor: v6 prefix changed ($V6BR -> $V6P), refreshing"
         [ -n "$V6BR" ] && ip addr del ${V6BR}::1/64 dev $BR 2>/dev/null
@@ -339,35 +395,38 @@ monitor() {
         [ -n "$W6" ] && {
             log "monitor: framework v6 resurrected on wlan0 ($W6), removing"
             ip -6 addr del "$W6" dev wlan0 2>/dev/null
-            P6=$(echo "$W6" | cut -d: -f1-4)
+            P6=$(v6_prefix_of_addr "$W6")
             ip -6 route del ${P6}::/64 dev wlan0 table 1032 2>/dev/null
             ip -6 route replace ${P6}::/64 dev $BR table local_network 2>/dev/null
         }
     fi
     # proxy NDP 跟随: 客户端新 SLAAC 地址自动代理(前缀内 br0 邻居 → sipa proxy)
     echo 1 > /proc/sys/net/ipv6/conf/$WAN/proxy_ndp 2>/dev/null
-    V6P2=$(ip -6 addr show $BR 2>/dev/null | grep -m1 "scope global" | grep -m1 -v "fcfd" | awk '{print $2}' | cut -d: -f1-4)
+    V6P2=$(v6_prefix_of $BR)
     if [ -n "$V6P2" ]; then
         # 来源1: br0 邻居表(已解析的)
-        for A in $(ip -6 neigh show dev $BR 2>/dev/null | grep -oE "^2408:[0-9a-f:]+"); do
-            case "$A" in
-                ${V6P2}*) ip -6 neigh show proxy dev $WAN 2>/dev/null | grep -q "$A" || ip -6 neigh replace proxy $A dev $WAN 2>/dev/null ;;
-            esac
+        for A in $(ip -6 neigh show dev $BR 2>/dev/null | awk '$1 ~ /:/ && $1 !~ /^fe80/ {print $1}'); do
+            v6_in_prefix "$A" "$V6P2" && {
+                ip -6 neigh show proxy dev $WAN 2>/dev/null | grep -q "$A" || ip -6 neigh replace proxy $A dev $WAN 2>/dev/null
+            }
         done
         # 来源2: conntrack 流的 src(隐私地址发包先于邻居解析 — 主动补, 消除黑洞窗口)
-        for A in $(grep "^ipv6" /proc/net/nf_conntrack 2>/dev/null | grep -oE "src=2408:[0-9a-f:]+" | cut -d= -f2); do
-            case "$A" in
-                ${V6P2}*) ip -6 neigh show proxy dev $WAN 2>/dev/null | grep -q "$A" || { ip -6 neigh replace proxy $A dev $WAN 2>/dev/null; log "monitor: proxy NDP +$A (from conntrack)"; } ;;
-            esac
+        for A in $(grep "^ipv6" /proc/net/nf_conntrack 2>/dev/null | grep -oE "src=[0-9a-f:]{4,}" | cut -d= -f2 | grep -v "^fe80"); do
+            v6_in_prefix "$A" "$V6P2" && {
+                ip -6 neigh show proxy dev $WAN 2>/dev/null | grep -q "$A" || { ip -6 neigh replace proxy $A dev $WAN 2>/dev/null; log "monitor: proxy NDP +$A (from conntrack)"; }
+            }
         done
     fi
     # sipa 表 kernel 连接路由复发压制(同段双挂副产物, 会抢道使 NS 发错口)
-    ip -6 route show table $WAN 2>/dev/null | grep -q "${V6P:-2408}/64 dev $WAN proto kernel" && {
-        ip -6 route del ${V6P}/64 dev $WAN proto kernel table $WAN 2>/dev/null
-        log "monitor: sipa kernel v6 route re-suppressed"
-    }
+    # v1.8 修: 旧写法 grep "${V6P:-2408}/64"(前缀少一个冒号) 与 iproute2 打印的 "前缀::/64" 不匹配 → 压制恒不触发
+    if [ -n "$V6P" ]; then
+        ip -6 route show table $WAN 2>/dev/null | grep -q "${V6P}::/64 dev $WAN proto kernel" && {
+            ip -6 route del ${V6P}::/64 dev $WAN proto kernel table $WAN 2>/dev/null
+            log "monitor: sipa kernel v6 route re-suppressed (${V6P}/64)"
+        }
+    fi
     # 回程三表 v6 路由复发(框架动作会清空)
-    V6P3=$(ip -6 addr show $BR 2>/dev/null | grep -m1 "scope global" | grep -m1 -v "fcfd" | awk '{print $2}' | cut -d: -f1-4)
+    V6P3=$(v6_prefix_of $BR)
     if [ -n "$V6P3" ]; then
         for T in local_network legacy_system legacy_network; do
             ip -6 route show table $T 2>/dev/null | grep -q "dev $BR" || {
@@ -376,11 +435,11 @@ monitor() {
             }
         done
     fi
-    # local_network v6 指向 wlan0 的复发
-    P6W=$(ip -6 route show table local_network 2>/dev/null | grep -oE "^2408:[0-9a-f:]*:[0-9a-f]*:" | head -1)
+    # local_network v6 指向 wlan0 的复发 (v1.8: 不再按 2408 认前缀 —— 取表内第一条非 fe80/ULA 的 v6 路由, 自带 /64)
+    P6W=$(ip -6 route show table local_network 2>/dev/null | awk '$1 ~ /:/ && $1 !~ /^fe80/ && $1 !~ /^f[cd]/ {print $1; exit}')
     [ -n "$P6W" ] && ip -6 route show table local_network | grep -q "dev wlan0" && {
-        ip -6 route replace ${P6W}:/64 dev $BR table local_network 2>/dev/null
-        log "monitor: local_network v6 route fixed"
+        ip -6 route replace $P6W dev $BR table local_network 2>/dev/null
+        log "monitor: local_network v6 route fixed ($P6W)"
     }
 }
 

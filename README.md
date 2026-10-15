@@ -11,6 +11,8 @@ FM_U20 (UNISOC 随身WiFi, Android 13, 32 位 userland) 的 **WiFi/有线同网�
 
 - **统一网段**: wlan0(热点AP) + eth0(USB有线) 二层桥接为 `br0 = 192.168.88.1/24`, WiFi 与有线客户端同段互通
 - **IPv6 双栈**: 蜂窝 /64 双挂 br0, dnsmasq 2.90(自编 armv7 静态) 发 RA/DHCPv6, 客户端 SLAAC 拿到运营商真 v6
+- **运营商无关 (v1.8)**: 蜂窝 v6 前缀从上游实际地址推导(联通 2408 / 移动 2409 / 电信 240e / 其他皆可),
+  不再写死运营商; 前缀每次重拨变化也能自动跟上, 需要时可用 `KANO_V6_PREFIX` 显式指定
 - **Clash 透明代理零冲突**: tproxy 流量照常命中, v6 纯转发直通
 - **域名劫持**: 内置 DNS 服务(53), 可把任意域名解析到内网 IP (iStore 风格), 面板可视化增删
 - **全内存态**: `run.sh -k` 或重启即还原出厂网络; 15s 守护自愈(桥/MAC/路由表/v6 前缀/热点)
@@ -53,6 +55,18 @@ sh /data/kano_bridge/run.sh -m   # 单轮自愈
 sh /data/kano_bridge/run.sh -d   # 守护循环(15s)
 ```
 
+### 换运营商 / 指定 v6 前缀 (v1.8)
+
+蜂窝 IPv6 前缀自动从上游地址推导, 换卡直接用, 无需改脚本。需要强制指定时(前缀异常、实验室环境):
+
+```
+KANO_V6_PREFIX=2409:8a00:1234:0 sh /data/kano_bridge/run.sh -s   # <4 段前缀>, :: 可带可不带
+```
+
+推导优先级: `KANO_V6_PREFIX` > 接口上 `scope global dynamic`(SLAAC) > 任意 `scope global`(排除 fe80/ULA)。
+启动日志会打印实际用到的前缀(`cellular v6 prefix = xxxx:xxxx:xxxx:xxxx/64`), 守护每轮比对上游与 br0,
+前缀变了(重拨/换卡)自动刷新 br0 地址、路由四表与 RA。详见 `scripts/README.md` 第八节。
+
 ## 域名劫持 (DNS)
 
 桥接模式下本插件的 dnsmasq 是 br0 的唯一 DHCP 服务器, 同时内置 DNS 转发。
@@ -76,7 +90,7 @@ server=/内网域名后缀/192.168.88.1
 - `bin-armv7/` `dnsmasq` 2.90 (zig 交叉编译静态, Android 补丁: 无 `/etc/passwd` 时强制以 root 运行)
 - `gen/gen_bridge_plugin_v13.py` 插件生成器(改 `scripts/` 后重跑即重新打包, 产物确定性)
 - `gen/plugin_harness_bridge.js` 插件宿主模拟器(交付前自检, 见下)
-- `dist/` tar.gz 发行包(v1.3 ~ v1.7)
+- `dist/` tar.gz 发行包(v1.3 ~ v1.8)
 
 ## 自检
 
@@ -109,7 +123,6 @@ DHCP/DNS 直接不启动)、以及字节是否与生成器产物一致; 另外�
 
 ## 已知限制
 
-- `run.sh` 里蜂窝 IPv6 前缀的识别按 `2408::/16` (中国联通) 硬编码, 换运营商需同步修改 (搜索 `2408`)。
 - 守护是 15s 轮询(Android 用户态没有可订阅的网络事件源), 非中断驱动。
 - 未附开源许可证: 默认保留所有权利(第三方组件 dnsmasq 仍受 GPLv2 约束)。
 
