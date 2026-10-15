@@ -15,7 +15,7 @@ FM_U20 (UNISOC 随身WiFi, Android 13, 32 位 userland) 的 **WiFi/有线同网�
 - **域名劫持**: 内置 DNS 服务(53), 可把任意域名解析到内网 IP (iStore 风格), 面板可视化增删
 - **全内存态**: `run.sh -k` 或重启即还原出厂网络; 15s 守护自愈(桥/MAC/路由表/v6 前缀/热点)
 - **热点守护 (v1.7)**: 蜂窝重拨会拆掉厂商 tethering 栈导致热点不再复活, 守护检测后自动 `HotspotCtl restart`
-  (需要厂商的 `hotspotctl.dex`, **本公开仓库未附带**, 见下「第三方组件说明」)
+  (依赖厂商的 `hotspotctl.dex`, 已随发行包/插件一起提供, 见下「第三方组件说明」)
 
 ## 适用设备 / 前提
 
@@ -64,17 +64,32 @@ server=/内网域名后缀/192.168.88.1
 - `scripts/` `run.sh`(服务) `off.sh`(一键还原) `dnsmasq.conf` `README.md`(全记录文档: 每步操作/作用/不做的后果/回滚) `extract_hotspotctl.sh`
 - `bin-armv7/` `dnsmasq` 2.90 (zig 交叉编译静态, Android 补丁: 无 `/etc/passwd` 时强制以 root 运行)
 - `gen/gen_bridge_plugin_v13.py` 插件生成器(改 `scripts/` 后重跑即重新打包, 产物确定性)
+- `gen/plugin_harness_bridge.js` 插件宿主模拟器(交付前自检, 见下)
 - `dist/` tar.gz 发行包(v1.3 ~ v1.7)
+
+## 自检
+
+```bash
+# 正例: 期望全绿 (含真跑一遍插件安装流)
+node gen/plugin_harness_bridge.js plugin/bridge_manager_v1.3.js.txt ok
+# 负例: 期望安装链正确报错 (验证桩件真的会拦)
+node gen/plugin_harness_bridge.js plugin/bridge_manager_v1.3.js.txt nodnsmasq
+```
+
+模拟器桩掉宿主 DOM / shell 桥, 会**真跑一遍 `doInstall`** —— 把插件分块写进 `.b64.tmp` 的 base64 拼回来,
+解码解包, 校验内嵌包成员是否齐全、权限对不对(`bin/dnsmasq` 缺执行位则 `run.sh` 的 `[ -x "$DM" ]` 判定失败,
+DHCP/DNS 直接不启动)、以及字节是否与生成器产物一致; 另外查入口按钮/面板 id/单条 shell 命令行长度
+(< `MAX_ARG_STRLEN` 128KB)。插件在宿主里加载失败是**静默**的, 这是交付前唯一能抓到的环节。
 
 ## 第三方组件说明
 
 - **dnsmasq 2.90** (`bin-armv7/dnsmasq`): GPLv2。静态 armv7 构建, 源码为官方 2.90 tarball +
   Android 适配补丁(在 `src/dnsmasq.c` 的 user/group 解析前强制 `daemon->username=NULL; groupname=NULL; group_set=1;`,
   因为 Android 无 `/etc/passwd`)。按 GPLv2 要求, 需要源码者请开 issue 索取, 或自行按上述补丁编译。
-- **hotspotctl.dex**: v1.7 的热点守护需要厂商 UFI Tools App (`com.minikano.f50_sms`) 里 `assets/shell/hotspotctl.dex`
-  (走框架 `startTetheredHotspot` 重启热点, 保证 SoftAp 配置零漂移)。**该文件是厂商闭源资产, 本公开仓库不附带** ——
-  请在你自己的设备上用 `scripts/extract_hotspotctl.sh` 提取到 `/data/kano_bridge/bin/`, 守护即自动启用;
-  文件缺失时守护会记一条 WARN 并自行禁用, 不影响桥接其余功能。
+- **hotspotctl.dex** (`bin-armv7/hotspotctl.dex`, 26KB): 从厂商 UFI Tools App (`com.minikano.f50_sms`) 的
+  `assets/shell/` 提取的资产, 供 v1.7 热点守护调用 (走框架 `startTetheredHotspot` 重启热点, SoftAp 配置零漂移)。
+  **版权归原厂商**, 此处仅为在自有设备上与本 App 互操作而附带; 如不适, 删除该文件 (或 `SKIP_DEX=1` 重新生成插件)
+  后桥接其余功能不受影响, 只是热点守护会记一条 WARN 自行禁用。App 升级后用 `scripts/extract_hotspotctl.sh` 重新提取。
 
 ## 参考
 
@@ -85,7 +100,6 @@ server=/内网域名后缀/192.168.88.1
 
 - `run.sh` 里蜂窝 IPv6 前缀的识别按 `2408::/16` (中国联通) 硬编码, 换运营商需同步修改 (搜索 `2408`)。
 - 守护是 15s 轮询(Android 用户态没有可订阅的网络事件源), 非中断驱动。
-- 公开仓库未附带厂商 `hotspotctl.dex`, 因此热点守护默认处于「检测到缺文件即禁用」状态 (见上)。
 - 未附开源许可证: 默认保留所有权利(第三方组件 dnsmasq 仍受 GPLv2 约束)。
 
 ## 免责声明

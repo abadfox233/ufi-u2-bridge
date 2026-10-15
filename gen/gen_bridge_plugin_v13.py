@@ -18,6 +18,11 @@ SRC = os.environ.get("SRC")
 OUT = os.environ.get("OUT", os.path.join(REPO, "plugin", "bridge_manager_v1.3.js.txt"))
 
 
+# 成员权限(必须显式给对: run.sh 里 `[ -x "$DM" ]` 判定 dnsmasq 可执行, 0644 会让 DHCP/DNS 直接不启动)
+MODES = {"run.sh": 0o755, "off.sh": 0o755, "bin/dnsmasq": 0o755,
+         "dnsmasq.conf": 0o644, "README.md": 0o644, "bin/hotspotctl.dex": 0o644}
+
+
 def collect():
     """[(arcname, 源路径)] — 顺序固定"""
     if SRC:
@@ -40,7 +45,7 @@ with tarfile.open(fileobj=buf, mode="w") as tf:
     for arcname, path in collect():
         blob = open(path, "rb").read()
         ti = tarfile.TarInfo(arcname)
-        ti.size, ti.mtime, ti.mode = len(blob), 0, 0o644
+        ti.size, ti.mtime, ti.mode = len(blob), 0, MODES.get(arcname, 0o644)
         ti.uid = ti.gid = 0
         tf.addfile(ti, io.BytesIO(blob))
 data = gzip.compress(buf.getvalue(), compresslevel=9, mtime=0)
