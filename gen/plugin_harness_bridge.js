@@ -172,7 +172,14 @@ function parseTar(buf) {
     ok(modes['run.sh'] && (modes['run.sh'] & 0o111) !== 0, 'run.sh 可执行位在');
     ok(modes['bin/hotspotctl.dex'] !== undefined && (modes['bin/hotspotctl.dex'] & 0o111) === 0, 'hotspotctl.dex 0644(app_process 读文件不需执行位)');
     const dexInTar = decoded.find(f => f.name === 'bin/hotspotctl.dex');
-    ok(!!dexInTar && dexInTar.size === fs.statSync('bin-armv7/hotspotctl.dex').size, '内嵌 dex 大小与仓库一致', String(dexInTar && dexInTar.size));
+    // dex 是可选成员(生成器 SKIP_DEX=1 时不含) → 按仓库里有没有该文件自适应判定, 路径按脚本位置解析
+    const dexPath = require('path').join(__dirname, '..', 'bin-armv7', 'hotspotctl.dex');
+    const dexExists = fs.existsSync(dexPath);
+    if (dexExists) {
+      ok(!!dexInTar && dexInTar.size === fs.statSync(dexPath).size, '内嵌 dex 与仓库文件一致', String(dexInTar && dexInTar.size));
+    } else {
+      ok(!dexInTar, '(仓库无 hotspotctl.dex) 内嵌包也不含它');
+    }
   } else ok(false, '解码解包成功');
   const lastAfter = calls.filter(c => c[0] === 'sh').slice(-4).map(c => String(c[1]).replace(/\s+/g, ' ').slice(0, 70));
   console.log('     安装流尾部 shell:', JSON.stringify(lastAfter, null, 0));
