@@ -9,6 +9,11 @@
 #       改为从 $WAN 的 SLAAC(scope global dynamic) 地址推导 /64 前缀, 退化取任意 scope global(排除 fe80/ULA);
 #       可用 KANO_V6_PREFIX 显式覆盖(形如 2409:8a00:1234:0)。顺带修两处"正则与地址文本不匹配"的历史死代码:
 #       启动时 proxy NDP 播种 与 sipa 表 kernel 路由压制 —— 旧写法(去掉冒号拼正则 / 前缀少一个冒号)永不命中。
+# v1.9: v4 转发放行规则自愈 — 框架 netd 在 start() 之后会重建 tetherctrl_* 链(开机时序竞争),
+#       冲掉我们插的 br0<->sipa_eth0 ACCEPT → 链尾 DROP 吞掉全部客户端 v4 流量。
+#       2026-10-17 事故: 子路由(纯v4)全断而 v6 客户端照常, 1113+ 包被 DROP, 任何版本(≤v1.8)都无自愈。
+#       monitor 每轮补检: tetherctrl_FORWARD 两条放行 + ip rule 21000 + wlan0 幽灵 v4 复发;
+#       start() 的规则插入改幂等(-C||-I), 防重启时规则残留导致堆叠。
 # 用法: run.sh -s|-k|-r|-t|-m|-d  (start/stop/restart/status/monitor/daemon)
 # 依赖: bin/dnsmasq (2.90 armv7 static, Android-patched), bin/hotspotctl.dex (UFI Tools 提取), /system/bin/ip, iptables
 # 全部内存态, stop 或重启即还原出厂
@@ -208,8 +213,11 @@ start() {
 
     # 路由/转发
     ip rule add pref $RULE_PREF iif $BR lookup $WAN 2>/dev/null
-    iptables -I tetherctrl_FORWARD 1 -i $BR -o $WAN -j ACCEPT
-    iptables -I tetherctrl_FORWARD 1 -i $WAN -o $BR -m state --state RELATED,ESTABLISHED -j ACCEPT
+    # v1.9: 幂等插入 (-C 先查再插, 重启残留/堆叠防护)
+    iptables -C tetherctrl_FORWARD -i $BR -o $WAN -j ACCEPT 2>/dev/null || \
+        iptables -I tetherctrl_FORWARD 1 -i $BR -o $WAN -j ACCEPT
+    iptables -C tetherctrl_FORWARD -i $WAN -o $BR -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+        iptables -I tetherctrl_FORWARD 1 -i $WAN -o $BR -m state --state RELATED,ESTABLISHED -j ACCEPT
     # 关键: 修 local_network 表黑洞 (框架残留 wlan0 静态路由)
     ip route replace $BR_NET dev $BR table local_network
     # eth0 随机段路由也指回 br0 (框架把它配在 eth0 上, 桥内无害但表项要一致)
@@ -315,6 +323,34 @@ status() {
 monitor() {
     # v1.7: 热点守护最优先 — 热点死了一切白搭
     hotspot_guard
+    # v1.9: v4 转发放行规则自愈 — 框架 netd 重建 tetherctrl_* 链会冲掉我们的 ACCEPT,
+    # 链尾 DROP 吞掉全部客户端 v4 流量(2026-10-17 子路由断网事故根因)。
+    # 指纹: iptables -L tetherctrl_FORWARD -v 里链尾 DROP 计数持续增长。
+    if ! iptables -C tetherctrl_FORWARD -i $BR -o $WAN -j ACCEPT 2>/dev/null; then
+        iptables -I tetherctrl_FORWARD 1 -i $BR -o $WAN -j ACCEPT
+        log "monitor: tetherctrl v4 FORWARD rule re-added (framework rebuilt chain)"
+    fi
+    if ! iptables -C tetherctrl_FORWARD -i $WAN -o $BR -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+        iptables -I tetherctrl_FORWARD 1 -i $WAN -o $BR -m state --state RELATED,ESTABLISHED -j ACCEPT
+        log "monitor: tetherctrl v4 return rule re-added"
+    fi
+    # v1.9: 分流规则同样会被框架清掉 (v6 客户端在此情况下也会断)
+    # 注意: ip rule show 打印 "21000:\tfrom all iif br0 lookup sipa_eth0" — 无 "pref" 关键字,
+    # 匹配器必须对齐真实输出格式(历史死代码教训: 拼出来的匹配器要拿真实样本验过)
+    ip rule show 2>/dev/null | grep -q "^$RULE_PREF:.*iif $BR lookup $WAN" || {
+        ip rule add pref $RULE_PREF iif $BR lookup $WAN 2>/dev/null
+        log "monitor: ip rule $RULE_PREF re-added"
+    }
+    # v1.9: v6 分流规则同样处理 (v6 版打印同格式)
+    ip -6 rule show 2>/dev/null | grep -q "^$RULE_PREF:.*iif $BR lookup $WAN" || {
+        ip -6 rule add pref $RULE_PREF iif $BR lookup $WAN 2>/dev/null
+        log "monitor: v6 ip rule $RULE_PREF re-added"
+    }
+    # v1.9: 框架幽灵重配 wlan0 v4 (start 后 netd 重断言 tethering) — 删除连带 kernel 路由一起消失
+    ip -4 addr show wlan0 2>/dev/null | grep -q "inet $BR_IP" && {
+        ip addr del $BR_IP/24 dev wlan0 2>/dev/null
+        log "monitor: ghost v4 on wlan0 removed"
+    }
     if ! ip link show $BR >/dev/null 2>&1; then
         log "monitor: bridge lost, restarting"
         stop 2>/dev/null

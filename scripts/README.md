@@ -132,3 +132,34 @@ v1.0~v1.7 把运营商前缀当常量用: 四处正则/比对写死 `2408`(中�
 - 设备实机只读复核: 真接口 `sipa_eth0`/`br0` → `2408:8409:7901:25ca`(与现场一致), `wlan0`/`lo` → 空;
   `KANO_V6_PREFIX=2409:8a00:1234:0` 覆盖生效; `v6_prefix_of_addr` 对压缩地址 `2409:8a00::1:2` 正确展开为 `2409:8a00:0:0`。
 - monitor 判定仿真: 上游前缀 == br0 前缀 → 不动作(当前现场状态正确); 带覆盖时 → 触发刷新(符合预期)。
+
+## 九、v4 转发规则自愈 (v1.9, 2026-10-17)
+
+### 事故
+2026-10-17 15:31 设备重启后, 有线/无线客户端 v4 全断(v6 客户端幸存掩盖了症状)。
+桥、DHCP、DNS、v6 链路全部正常 —— 唯独 `tetherctrl_FORWARD` 链里我们插的两条放行规则
+被框架 netd 重建链时冲掉, 链尾 DROP 吞掉全部客户端 v4 流量(1113+ 包)。
+子路由(纯 v4 设备)拿不到 DNS 应答后放弃重试, L2 上彻底消失。
+
+### 根因(两层)
+1. **框架重建链**: 开机时序竞争 — start() 插完规则后, 框架重新断言 wlan0 tethering,
+   重建 `tetherctrl_*` 全套链(v4+v6), 我们的规则不在重建清单里。
+   指纹: 链内接口对从 br0 变回 wlan0 / wlan0 被重配 88.1 / main 表出现 wlan0 kernel 路由。
+2. **无人自愈**: v1.0~v1.8 的 monitor() 只补路由/邻居/RA, 不补 iptables 规则 —
+   "框架会静默清 FORWARD 规则"的教训(kano_wireguard 2026-10-10 事故)从未传播到 kano_bridge。
+
+### 修复(v1.9)
+- start(): 规则插入改幂等(`-C || -I`), 防重启残留堆叠。
+- monitor(): 每轮(15s)补检四项 —
+  1. `tetherctrl_FORWARD` 两条 v4 放行(br0↔sipa_eth0)
+  2. `ip rule 21000` v4 分流(匹配器对齐 `ip rule show` 真实格式 `21000:\t...`, 无 "pref" 字样)
+  3. `ip -6 rule 21000` v6 分流
+  4. wlan0 幽灵 v4 复发(`ip addr del` 连带 kernel 路由一起消失)
+- 验证(真机注入式): 删规则+删 rule+加幽灵地址 → 守护 8 秒内全部补回, ACCEPT 计数器恢复流动。
+
+### 检查指纹
+```sh
+iptables -L tetherctrl_FORWARD -v -n | head -4   # 链尾 DROP 计数持续涨 = 规则被冲, 等守护补
+ip rule show | grep 21000                         # v4+v6 两条都要在
+ip -4 addr show wlan0                             # 不应有 inet 192.168.88.1
+```

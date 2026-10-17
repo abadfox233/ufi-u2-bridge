@@ -29,7 +29,7 @@ FM_U20 (UNISOC 随身WiFi, Android 13, 32 位 userland) 的 **WiFi/有线同网�
 
 两种方式, 任选其一:
 
-1. **插件(推荐)**: UFI Tools 插件管理导入 `plugin/bridge_manager_v1.3.js.txt` (自包含, 离线可装),
+1. **插件(推荐)**: UFI Tools 插件管理导入 `plugin/bridge_manager_v1.9.js.txt` (自包含, 离线可装),
    主界面出现「桥接管理」, 点【安装】即部署到 `/data/kano_bridge/`。
 2. **手动**: 解 `dist/kano_bridge_v1.7.tar.gz` 到 `/data/kano_bridge/`, 补执行权限后启动:
 
@@ -96,9 +96,9 @@ server=/内网域名后缀/192.168.88.1
 
 ```bash
 # 正例: 期望全绿 (含真跑一遍插件安装流)
-node gen/plugin_harness_bridge.js plugin/bridge_manager_v1.3.js.txt ok
+node gen/plugin_harness_bridge.js plugin/bridge_manager_v1.9.js.txt ok
 # 负例: 期望安装链正确报错 (验证桩件真的会拦)
-node gen/plugin_harness_bridge.js plugin/bridge_manager_v1.3.js.txt nodnsmasq
+node gen/plugin_harness_bridge.js plugin/bridge_manager_v1.9.js.txt nodnsmasq
 ```
 
 模拟器桩掉宿主 DOM / shell 桥, 会**真跑一遍 `doInstall`** —— 把插件分块写进 `.b64.tmp` 的 base64 拼回来,

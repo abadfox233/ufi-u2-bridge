@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 生成 kano_bridge UFI Tools 插件 (plugin/bridge_manager_v1.3.js.txt)
+# 生成 kano_bridge UFI Tools 插件 (plugin/bridge_manager_v1.9.js.txt)
 #
 # 用法: python3 gen/gen_bridge_plugin_v13.py
 #   默认从仓库内取源:
@@ -7,7 +7,7 @@
 #     + bin-armv7/hotspotctl.dex (可选, 提取自 UFI Tools App — 见 scripts/extract_hotspotctl.sh)
 #   环境变量:
 #     SRC=<扁平目录>  兼容旧用法: 该目录需含 run.sh/off.sh/dnsmasq.conf/README.md/bin/dnsmasq
-#     OUT=<路径>      输出路径 (默认 plugin/bridge_manager_v1.3.js.txt)
+#     OUT=<路径>      输出路径 (默认 plugin/bridge_manager_v1.9.js.txt)
 #     SKIP_DEX=1      不把 hotspotctl.dex 打进安装包
 #   产物确定性: tar 元数据归零 + 文件顺序固定 + gzip mtime=0 → 重复运行字节一致
 import base64, tarfile, io, os, sys, gzip, hashlib
@@ -15,7 +15,7 @@ import base64, tarfile, io, os, sys, gzip, hashlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 SRC = os.environ.get("SRC")
-OUT = os.environ.get("OUT", os.path.join(REPO, "plugin", "bridge_manager_v1.3.js.txt"))
+OUT = os.environ.get("OUT", os.path.join(REPO, "plugin", "bridge_manager_v1.9.js.txt"))
 
 
 # 成员权限(必须显式给对: run.sh 里 `[ -x "$DM" ]` 判定 dnsmasq 可执行, 0644 会让 DHCP/DNS 直接不启动)
@@ -55,13 +55,13 @@ pkg_js = "const PKG_B64 = [\n" + ",\n".join("'" + l + "'" for l in lines) + "\n 
 print(f"tar.gz={len(data)}B b64={len(b64)} chars lines={len(lines)} "
       f"sha256={hashlib.sha256(data).hexdigest()[:16]}", file=sys.stderr)
 
-tpl = r'''<!-- [KANO_PLUGIN_START] 桥接管理_kano_bridge_v1.3.js -->
+tpl = r'''<!-- [KANO_PLUGIN_START] 桥接管理_kano_bridge_v1.9.js -->
 //<script>
 (() => {
     // ============================================================
-    // 桥接管理 (kano_bridge) v1.3 — WiFi/有线同网段桥接 (88.0/24, v4+v6) + DNS 劫持管理
+    // 桥接管理 (kano_bridge) v1.9 — WiFi/有线同网段桥接 (88.0/24, v4+v6) + DNS 劫持管理
     // 自包含: 内嵌 run.sh/off.sh/dnsmasq.conf/README + dnsmasq 2.90 armv7 静态
-    // v1.2: 新增 DNS 劫持界面 — 增/删劫持条目, 一键重载生效
+    // v1.9: 内嵌 run.sh v1.9 (v4 转发规则自愈)。v1.2: 新增 DNS 劫持界面 — 增/删劫持条目, 一键重载生效
     //       劫持语法: address=/域名/IP  (IP 留空=屏蔽域名; 填 :: =屏蔽该域名 IPv6)
     // 规约: createModal+showModal, .actions-buttons+.btn, 300x120ms 等待,
     //       root 检查放点击时, onClose 清定时器, @@EOF@@ 分隔
@@ -427,7 +427,7 @@ tpl = r'''<!-- [KANO_PLUGIN_START] 桥接管理_kano_bridge_v1.3.js -->
     mountBtn()
 })()
 //</script>
-<!-- [KANO_PLUGIN_END] 桥接管理_kano_bridge_v1.3.js -->
+<!-- [KANO_PLUGIN_END] 桥接管理_kano_bridge_v1.9.js -->
 '''
 
 out = tpl.replace("__PKG_B64__", pkg_js)
